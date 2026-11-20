@@ -79,7 +79,7 @@ jobs:
       - name: Generate main.js
         run: |
           cat > main.js <<'EOF'
-          const { app, BrowserWindow, session, desktopCapturer, dialog, Menu } = require('electron');
+          const { app, BrowserWindow, session, desktopCapturer, dialog, Menu, systemPreferences, shell } = require('electron');
           const path = require('path');
 
           const SITE_URL = '__SITE_URL__';
@@ -87,6 +87,34 @@ jobs:
 
           if (!app.requestSingleInstanceLock()) {
             app.quit();
+          }
+
+          // Auto-accept camera/mic prompts and allow remote audio/video to play without a click
+          app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+          app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+          // Windows privacy check: warn if the OS itself is blocking the microphone/camera
+          async function checkWindowsMediaAccess() {
+            if (process.platform !== 'win32') return;
+            const blocked = [];
+            for (const type of ['microphone', 'camera']) {
+              try {
+                if (systemPreferences.getMediaAccessStatus(type) === 'denied') blocked.push(type);
+              } catch (e) {}
+            }
+            if (!blocked.length) return;
+            const { response } = await dialog.showMessageBox(win, {
+              type: 'warning',
+              title: 'دسترسی ویندوز',
+              message: 'ویندوز دسترسی ' + blocked.map(b => b === 'microphone' ? 'میکروفن' : 'دوربین').join(' و ') + ' را برای برنامه‌ها بسته است.',
+              detail: 'در تنظیمات ویندوز گزینه «Let desktop apps access your microphone/camera» را روشن کنید و برنامه را دوباره باز کنید.',
+              buttons: ['باز کردن تنظیمات', 'بعداً'],
+              defaultId: 0,
+              cancelId: 1
+            });
+            if (response === 0) {
+              shell.openExternal(blocked.includes('microphone') ? 'ms-settings:privacy-microphone' : 'ms-settings:privacy-webcam');
+            }
           }
 
           let win;
@@ -158,6 +186,7 @@ jobs:
             });
 
             createWindow();
+            win.webContents.once('did-finish-load', checkWindowsMediaAccess);
             app.on('activate', () => {
               if (BrowserWindow.getAllWindows().length === 0) createWindow();
             });
