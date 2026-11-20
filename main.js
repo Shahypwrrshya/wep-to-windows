@@ -17,7 +17,7 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
     title: 'Rayahoosh',
-    icon: path.join(__dirname, 'icon.png'),
+    icon: path.join(__dirname, 'icon.ico'),
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
