@@ -28,17 +28,53 @@ jobs:
         with:
           node-version: 20
 
-      - name: Find icon
+      - name: Prepare icon (any name, any format -> proper 256px .ico)
         run: |
-          if [ -f icon.ico ]; then
-            echo "ICON=icon.ico" >> "$GITHUB_ENV"
-          elif [ -f icon.png ]; then
-            echo "ICON=icon.png" >> "$GITHUB_ENV"
-          else
-            echo "::error::icon.ico or icon.png not found in repo root. Upload your icon (min 256x256) next to .github folder."
-            ls -la
-            exit 1
-          fi
+          mkdir -p tools
+          cat > tools/package.json <<'EOF'
+          { "name": "tools", "private": true }
+          EOF
+          cat > tools/prep-icon.js <<'EOF'
+          const fs = require('fs');
+          const sharp = require('sharp');
+          const pngToIco = require('png-to-ico');
+
+          const files = fs.readdirSync('.').filter(f => fs.statSync(f).isFile());
+          const pick = re => files.filter(f => re.test(f)).sort();
+
+          // Priority: icon*.png/jpg/webp -> any png/jpg/webp -> any .ico
+          const img =
+            pick(/^icon.*\.(png|jpe?g|webp)$/i)[0] ||
+            pick(/\.(png|jpe?g|webp)$/i)[0];
+          const ico = pick(/\.ico$/i)[0];
+
+          (async () => {
+            if (img) {
+              console.log('Using image:', img);
+              const sizes = [256, 128, 64, 48, 32, 16];
+              const bufs = [];
+              for (const s of sizes) {
+                bufs.push(
+                  await sharp(img)
+                    .resize(s, s, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+                    .png()
+                    .toBuffer()
+                );
+              }
+              fs.writeFileSync('app-icon.ico', await pngToIco(bufs));
+            } else if (ico) {
+              console.log('Using ico as-is:', ico);
+              fs.copyFileSync(ico, 'app-icon.ico');
+            } else {
+              console.error('::error::No icon found in repo root. Upload a PNG/JPG/ICO file (any name, ideally 256x256+) next to the .github folder.');
+              process.exit(1);
+            }
+            fs.appendFileSync(process.env.GITHUB_ENV, 'ICON=app-icon.ico\n');
+          })();
+          EOF
+          (cd tools && npm install sharp@0.33 png-to-ico@2.1.8)
+          node tools/prep-icon.js
+          rm -rf tools
 
       - name: Generate main.js
         run: |
