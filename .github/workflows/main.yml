@@ -9,9 +9,16 @@ on:
 permissions:
   contents: write
 
+env:
+  SITE_URL: https://rayahoosh.ct.ws
+  APP_NAME: Rayahoosh
+
 jobs:
   build:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,6 +27,166 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      - name: Find icon
+        run: |
+          if [ -f icon.ico ]; then
+            echo "ICON=icon.ico" >> "$GITHUB_ENV"
+          elif [ -f icon.png ]; then
+            echo "ICON=icon.png" >> "$GITHUB_ENV"
+          else
+            echo "::error::icon.ico or icon.png not found in repo root. Upload your icon (min 256x256) next to .github folder."
+            ls -la
+            exit 1
+          fi
+
+      - name: Generate main.js
+        run: |
+          cat > main.js <<'EOF'
+          const { app, BrowserWindow, session, desktopCapturer, dialog, Menu } = require('electron');
+          const path = require('path');
+
+          const SITE_URL = '__SITE_URL__';
+          const ICON_FILE = '__ICON__';
+
+          if (!app.requestSingleInstanceLock()) {
+            app.quit();
+          }
+
+          let win;
+
+          function createWindow() {
+            win = new BrowserWindow({
+              width: 1280,
+              height: 800,
+              minWidth: 800,
+              minHeight: 600,
+              title: '__APP_NAME__',
+              icon: path.join(__dirname, ICON_FILE),
+              autoHideMenuBar: true,
+              webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false,
+                sandbox: true,
+                backgroundThrottling: false
+              }
+            });
+
+            Menu.setApplicationMenu(null);
+
+            // Chrome-like User-Agent (some free hosts block Electron)
+            const ua = win.webContents.getUserAgent()
+              .replace(/\sElectron\/[\d.]+/, '')
+              .replace(/\s[\w-]+\/[\d.]+\sChrome/, ' Chrome');
+            win.webContents.setUserAgent(ua);
+
+            win.loadURL(SITE_URL);
+            win.webContents.setWindowOpenHandler(() => ({ action: 'allow' }));
+            win.on('closed', () => { win = null; });
+          }
+
+          app.whenReady().then(() => {
+            const ses = session.defaultSession;
+
+            // Grant every permission (mic, camera, geolocation, notifications, clipboard, ...)
+            ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(true));
+            ses.setPermissionCheckHandler(() => true);
+            ses.setDevicePermissionHandler(() => true);
+
+            // Screen share
+            ses.setDisplayMediaRequestHandler(async (_request, callback) => {
+              try {
+                const sources = await desktopCapturer.getSources({
+                  types: ['screen', 'window'],
+                  thumbnailSize: { width: 0, height: 0 }
+                });
+                if (!sources.length) return callback({});
+
+                let chosen = sources[0];
+                if (sources.length > 1) {
+                  const { response } = await dialog.showMessageBox(win, {
+                    type: 'question',
+                    title: 'اشتراک صفحه',
+                    message: 'کدام صفحه یا پنجره را به اشتراک بگذارم؟',
+                    buttons: sources.map(s => s.name).concat('لغو'),
+                    cancelId: sources.length,
+                    noLink: true
+                  });
+                  if (response === sources.length) return callback({});
+                  chosen = sources[response];
+                }
+                callback({ video: chosen, audio: 'loopback' });
+              } catch (e) {
+                callback({});
+              }
+            });
+
+            createWindow();
+            app.on('activate', () => {
+              if (BrowserWindow.getAllWindows().length === 0) createWindow();
+            });
+          });
+
+          app.on('second-instance', () => {
+            if (win) {
+              if (win.isMinimized()) win.restore();
+              win.focus();
+            }
+          });
+
+          app.on('window-all-closed', () => {
+            if (process.platform !== 'darwin') app.quit();
+          });
+          EOF
+          sed -i "s|__SITE_URL__|$SITE_URL|g; s|__ICON__|$ICON|g; s|__APP_NAME__|$APP_NAME|g" main.js
+
+      - name: Generate package.json
+        run: |
+          cat > gen-package.js <<'EOF'
+          const fs = require('fs');
+          const icon = process.env.ICON;
+          const name = process.env.APP_NAME;
+          const pkg = {
+            name: name.toLowerCase(),
+            version: '1.0.0',
+            description: name + ' Desktop App',
+            author: 'Arshiya',
+            main: 'main.js',
+            devDependencies: {
+              electron: '^33.2.0',
+              'electron-builder': '^25.1.8'
+            },
+            build: {
+              appId: 'com.' + name.toLowerCase() + '.app',
+              productName: name,
+              directories: { output: 'dist' },
+              files: ['main.js', icon, 'package.json'],
+              win: {
+                target: [{ target: 'nsis', arch: ['x64'] }],
+                icon: icon,
+                artifactName: name + '-Setup-${version}.${ext}'
+              },
+              nsis: {
+                oneClick: false,
+                allowToChangeInstallationDirectory: true,
+                perMachine: false,
+                createDesktopShortcut: true,
+                createStartMenuShortcut: true,
+                shortcutName: name
+              }
+            }
+          };
+          // NSIS installer/uninstaller icons must be .ico
+          if (icon.endsWith('.ico')) {
+            pkg.build.nsis.installerIcon = icon;
+            pkg.build.nsis.uninstallerIcon = icon;
+            pkg.build.nsis.installerHeaderIcon = icon;
+          }
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          EOF
+          node gen-package.js
+          rm gen-package.js
+          cat package.json
 
       - name: Install dependencies
         run: npm install
@@ -32,7 +199,7 @@ jobs:
       - name: Upload Setup artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Rayahoosh-Setup
+          name: Setup-EXE
           path: dist/*.exe
 
       - name: Create GitHub Release (on tag)
