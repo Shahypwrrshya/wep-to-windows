@@ -20,7 +20,7 @@
     },
     "files": [
       "main.js",
-      "icon.png",
+      "icon.ico",
       "package.json"
     ],
     "win": {
@@ -30,7 +30,7 @@
           "arch": ["x64"]
         }
       ],
-      "icon": "icon.png",
+      "icon": "icon.ico",
       "artifactName": "Rayahoosh-Setup-${version}.${ext}"
     },
     "nsis": {
@@ -40,8 +40,9 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Rayahoosh",
-      "installerIcon": "icon.png",
-      "uninstallerIcon": "icon.png"
+      "installerIcon": "icon.ico",
+      "uninstallerIcon": "icon.ico",
+      "installerHeaderIcon": "icon.ico"
     }
   }
 }
