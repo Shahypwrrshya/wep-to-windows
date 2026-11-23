@@ -250,11 +250,11 @@ jobs:
               directories: { output: 'dist' },
               files: ['main.js', 'app-icon.png', 'package.json'],
               mac: {
-                target: [{ target: 'dmg', arch: ['x64', 'arm64'] }],
+                // Build only the .app folders; DMG + ad-hoc signing are done in later steps
+                target: [{ target: 'dir', arch: ['x64', 'arm64'] }],
                 icon: 'app-icon.png',
                 category: 'public.app-category.productivity',
-                // Ad-hoc signature: required for the app to launch on Apple Silicon without a paid certificate
-                identity: '-',
+                identity: null,
                 hardenedRuntime: false,
                 gatekeeperAssess: false,
                 // Without these keys macOS silently blocks mic/camera
@@ -264,10 +264,6 @@ jobs:
                   NSScreenCaptureUsageDescription: 'This app needs screen recording for screen sharing.'
                 },
                 artifactName: name + '-${version}-${arch}.${ext}'
-              },
-              dmg: {
-                title: name,
-                window: { width: 540, height: 380 }
               }
             }
           };
@@ -280,10 +276,32 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build DMG (Intel + Apple Silicon)
-        run: npx electron-builder --mac dmg --x64 --arm64 --publish never
+      - name: Build .app (Intel + Apple Silicon)
+        run: npx electron-builder --mac dir --x64 --arm64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Ad-hoc sign + create DMG (no mounting, avoids hdiutil detach errors)
+        run: |
+          set -e
+          for APP in $(find dist -maxdepth 2 -name "*.app" -type d); do
+            case "$APP" in
+              *mac-arm64*) ARCH=arm64 ;;
+              *) ARCH=x64 ;;
+            esac
+            echo "== $APP ($ARCH)"
+            # Ad-hoc signature: required for the app to launch on Apple Silicon without a paid certificate
+            codesign --force --deep --sign - "$APP"
+            codesign --verify --deep --strict "$APP"
+
+            STAGE="dmg-stage-$ARCH"
+            rm -rf "$STAGE" && mkdir "$STAGE"
+            cp -R "$APP" "$STAGE/"
+            ln -s /Applications "$STAGE/Applications"
+            hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "dist/$APP_NAME-$ARCH.dmg"
+            rm -rf "$STAGE"
+          done
+          ls -la dist/*.dmg
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
