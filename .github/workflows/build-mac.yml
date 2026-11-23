@@ -1,0 +1,298 @@
+name: Build macOS App
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SITE_URL: https://rayahoosh.ct.ws
+  APP_NAME: Rayahoosh
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Prepare icon (any name, any format -> 1024px PNG for macOS .icns)
+        run: |
+          mkdir -p tools
+          cat > tools/package.json <<'EOF'
+          { "name": "tools", "private": true }
+          EOF
+          cat > tools/prep-icon.js <<'EOF'
+          const fs = require('fs');
+          const sharp = require('sharp');
+
+          const files = fs.readdirSync('.').filter(f => fs.statSync(f).isFile());
+          const pick = re => files.filter(f => re.test(f)).sort();
+
+          // Priority: icon*.png/jpg/webp -> any png/jpg/webp -> any .ico
+          const img =
+            pick(/^icon.*\.(png|jpe?g|webp)$/i)[0] ||
+            pick(/\.(png|jpe?g|webp)$/i)[0] ||
+            pick(/\.ico$/i)[0];
+
+          (async () => {
+            if (!img) {
+              console.error('::error::No icon found in repo root. Upload a PNG/JPG (ideally 1024x1024) next to the .github folder.');
+              process.exit(1);
+            }
+            console.log('Using image:', img);
+            // electron-builder converts a >=512px PNG to .icns automatically
+            await sharp(img)
+              .resize(1024, 1024, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+              .png()
+              .toFile('app-icon.png');
+          })();
+          EOF
+          (cd tools && npm install sharp@0.33)
+          node tools/prep-icon.js
+          rm -rf tools
+
+      - name: Generate main.js
+        run: |
+          cat > main.js <<'EOF'
+          const { app, BrowserWindow, session, desktopCapturer, dialog, Menu, systemPreferences, shell } = require('electron');
+          const path = require('path');
+
+          const SITE_URL = '__SITE_URL__';
+          const IS_MAC = process.platform === 'darwin';
+
+          if (!app.requestSingleInstanceLock()) {
+            app.quit();
+          }
+
+          // Allow remote audio/video to play without a click
+          app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+          let win;
+
+          // macOS: ask the OS for microphone + camera access (shows the system prompt once)
+          async function requestMacMediaAccess() {
+            if (!IS_MAC) return;
+            for (const type of ['microphone', 'camera']) {
+              try {
+                const status = systemPreferences.getMediaAccessStatus(type);
+                if (status === 'not-determined') {
+                  await systemPreferences.askForMediaAccess(type);
+                } else if (status === 'denied') {
+                  const label = type === 'microphone' ? 'میکروفن' : 'دوربین';
+                  const pane = type === 'microphone' ? 'Privacy_Microphone' : 'Privacy_Camera';
+                  const { response } = await dialog.showMessageBox({
+                    type: 'warning',
+                    message: 'دسترسی ' + label + ' برای برنامه بسته است.',
+                    detail: 'System Settings → Privacy & Security را باز کنید، دسترسی را روشن کنید و برنامه را دوباره باز کنید.',
+                    buttons: ['باز کردن تنظیمات', 'بعداً'],
+                    defaultId: 0,
+                    cancelId: 1
+                  });
+                  if (response === 0) {
+                    shell.openExternal('x-apple.systempreferences:com.apple.preference.security?' + pane);
+                  }
+                }
+              } catch (e) {}
+            }
+          }
+
+          // macOS: screen recording permission cannot be requested by code, only checked
+          async function checkMacScreenAccess() {
+            if (!IS_MAC) return;
+            try {
+              if (systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
+                const { response } = await dialog.showMessageBox(win, {
+                  type: 'info',
+                  message: 'برای اشتراک صفحه باید دسترسی Screen Recording را بدهید.',
+                  detail: 'System Settings → Privacy & Security → Screen & System Audio Recording → برنامه را روشن کنید و دوباره باز کنید.',
+                  buttons: ['باز کردن تنظیمات', 'بعداً'],
+                  defaultId: 0,
+                  cancelId: 1
+                });
+                if (response === 0) {
+                  shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+                }
+              }
+            } catch (e) {}
+          }
+
+          function buildMenu() {
+            if (IS_MAC) {
+              // Keep Cmd+C / Cmd+V / Cmd+Q etc. working
+              Menu.setApplicationMenu(Menu.buildFromTemplate([
+                { role: 'appMenu' },
+                { role: 'editMenu' },
+                { role: 'viewMenu' },
+                { role: 'windowMenu' }
+              ]));
+            } else {
+              Menu.setApplicationMenu(null);
+            }
+          }
+
+          function createWindow() {
+            win = new BrowserWindow({
+              width: 1280,
+              height: 800,
+              minWidth: 800,
+              minHeight: 600,
+              title: '__APP_NAME__',
+              icon: path.join(__dirname, 'app-icon.png'),
+              webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false,
+                sandbox: true,
+                backgroundThrottling: false
+              }
+            });
+
+            // Chrome-like User-Agent (some hosts block Electron)
+            const ua = win.webContents.getUserAgent()
+              .replace(/\sElectron\/[\d.]+/, '')
+              .replace(/\s[\w-]+\/[\d.]+\sChrome/, ' Chrome');
+            win.webContents.setUserAgent(ua);
+
+            win.loadURL(SITE_URL);
+            win.webContents.setWindowOpenHandler(() => ({ action: 'allow' }));
+            win.webContents.once('did-finish-load', checkMacScreenAccess);
+            win.on('closed', () => { win = null; });
+          }
+
+          app.whenReady().then(async () => {
+            buildMenu();
+            await requestMacMediaAccess();
+
+            const ses = session.defaultSession;
+
+            // Grant every web permission (mic, camera, geolocation, notifications, clipboard, ...)
+            ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(true));
+            ses.setPermissionCheckHandler(() => true);
+            ses.setDevicePermissionHandler(() => true);
+
+            // Screen share
+            ses.setDisplayMediaRequestHandler(async (_request, callback) => {
+              try {
+                const sources = await desktopCapturer.getSources({
+                  types: ['screen', 'window'],
+                  thumbnailSize: { width: 0, height: 0 }
+                });
+                if (!sources.length) return callback({});
+
+                let chosen = sources[0];
+                if (sources.length > 1) {
+                  const { response } = await dialog.showMessageBox(win, {
+                    type: 'question',
+                    message: 'کدام صفحه یا پنجره را به اشتراک بگذارم؟',
+                    buttons: sources.map(s => s.name).concat('لغو'),
+                    cancelId: sources.length,
+                    noLink: true
+                  });
+                  if (response === sources.length) return callback({});
+                  chosen = sources[response];
+                }
+                // System-audio loopback is not supported on macOS
+                callback(IS_MAC ? { video: chosen } : { video: chosen, audio: 'loopback' });
+              } catch (e) {
+                callback({});
+              }
+            });
+
+            createWindow();
+            app.on('activate', () => {
+              if (BrowserWindow.getAllWindows().length === 0) createWindow();
+            });
+          });
+
+          app.on('second-instance', () => {
+            if (win) {
+              if (win.isMinimized()) win.restore();
+              win.focus();
+            }
+          });
+
+          app.on('window-all-closed', () => {
+            if (process.platform !== 'darwin') app.quit();
+          });
+          EOF
+          sed -i '' "s|__SITE_URL__|$SITE_URL|g; s|__APP_NAME__|$APP_NAME|g" main.js
+
+      - name: Generate package.json
+        run: |
+          cat > gen-package.js <<'EOF'
+          const fs = require('fs');
+          const name = process.env.APP_NAME;
+          const pkg = {
+            name: name.toLowerCase(),
+            version: '1.0.0',
+            description: name + ' Desktop App',
+            author: 'Arshiya',
+            main: 'main.js',
+            devDependencies: {
+              electron: '^33.2.0',
+              'electron-builder': '^25.1.8'
+            },
+            build: {
+              appId: 'com.' + name.toLowerCase() + '.app',
+              productName: name,
+              directories: { output: 'dist' },
+              files: ['main.js', 'app-icon.png', 'package.json'],
+              mac: {
+                target: [{ target: 'dmg', arch: ['x64', 'arm64'] }],
+                icon: 'app-icon.png',
+                category: 'public.app-category.productivity',
+                // Ad-hoc signature: required for the app to launch on Apple Silicon without a paid certificate
+                identity: '-',
+                hardenedRuntime: false,
+                gatekeeperAssess: false,
+                // Without these keys macOS silently blocks mic/camera
+                extendInfo: {
+                  NSMicrophoneUsageDescription: 'This app needs the microphone for calls.',
+                  NSCameraUsageDescription: 'This app needs the camera for video calls.',
+                  NSScreenCaptureUsageDescription: 'This app needs screen recording for screen sharing.'
+                },
+                artifactName: name + '-${version}-${arch}.${ext}'
+              },
+              dmg: {
+                title: name,
+                window: { width: 540, height: 380 }
+              }
+            }
+          };
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          EOF
+          node gen-package.js
+          rm gen-package.js
+          cat package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build DMG (Intel + Apple Silicon)
+        run: npx electron-builder --mac dmg --x64 --arm64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Setup-DMG
+          path: dist/*.dmg
+
+      - name: Create GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
